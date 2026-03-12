@@ -12,3 +12,4 @@ logs/
 
 legacy/**/.history/
 legacy/**/cache/
+legacy/
