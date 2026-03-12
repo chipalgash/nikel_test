@@ -4,9 +4,14 @@ import re
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, Iterator, List, Tuple
 
 from docx import Document
+from docx.document import Document as _DocxDocument
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 from .config import SETTINGS
 from .schemas import Chunk
@@ -103,13 +108,55 @@ def _table_row_text(
     nums = re.findall(r"\d+(?:[.,]\d+)?", row_raw)
     nums_text = ",".join(nums) if nums else ""
     header_text = " | ".join([normalize_text(h) for h in headers if normalize_text(h)])
+    table_line = f"TABLE table_id={table_id} row_id={row_id} row={row_raw}"
     return (
+        f"{table_line}\n"
         f"[TABLE_ROW] [TABLE_ID={table_id}] [ROW_ID={row_id}] "
         f"[HEADER] {header_text} "
         f"[ROW_RAW] {row_raw} "
         f"[ROW_KV] {' ; '.join(kv_parts)} "
         f"[NUMS] {nums_text}"
     ).strip()
+
+
+def _iter_block_items(doc: _DocxDocument) -> Iterator[Tuple[str, Paragraph | Table]]:
+    body = doc.element.body
+    for child in body.iterchildren():
+        if isinstance(child, CT_P):
+            yield "paragraph", Paragraph(child, doc)
+        elif isinstance(child, CT_Tbl):
+            yield "table", Table(child, doc)
+
+
+def _heading_level(text: str) -> int | None:
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if re.match(r"^раздел\s+[ivxlcdm0-9]+", t):
+        return 1
+    if re.match(r"^глава\s+[0-9.]+", t):
+        return 1
+    if re.match(r"^статья\s+[0-9.\-]+", t):
+        return 2
+    if re.match(r"^пункт\s+[0-9.\-]+", t):
+        return 3
+    if re.match(r"^приложение\s+[а-яa-z0-9]+", t):
+        return 1
+    if re.match(r"^таблица\s+[0-9.\-]+", t):
+        return 3
+    m = re.match(r"^([0-9]+(?:\.[0-9]+){0,3})\s+", t)
+    if m:
+        depth = m.group(1).count(".")
+        return min(4, depth + 1)
+    return None
+
+
+def _set_heading(section_stack: List[str], heading: str, level: int) -> List[str]:
+    lvl = max(1, min(level, 4))
+    if len(section_stack) >= lvl:
+        section_stack = section_stack[: lvl - 1]
+    section_stack.append(heading)
+    return section_stack[-4:]
 
 
 def parse_docx(docx_path: Path) -> List[Block]:
@@ -121,40 +168,41 @@ def parse_docx(docx_path: Path) -> List[Block]:
     section_stack: List[str] = []
     blocks: List[Block] = []
 
-    for p in doc.paragraphs:
-        raw = normalize_text(p.text)
-        if not raw:
-            continue
-
-        if is_heading(raw):
-            section_stack.append(raw)
-            if len(section_stack) > 4:
-                section_stack = section_stack[-4:]
-            if _keep_heading_as_content(raw):
-                blocks.append(
-                    Block(
-                        text=raw,
-                        source_path=source_path,
-                        source_file=source_file,
-                        section_path=" > ".join(section_stack),
-                        block_type="paragraph",
+    table_id = 0
+    for block_kind, item in _iter_block_items(doc):
+        if block_kind == "paragraph":
+            raw = normalize_text(item.text)
+            if not raw:
+                continue
+            if is_heading(raw):
+                level = _heading_level(raw) or 4
+                section_stack = _set_heading(section_stack, raw, level)
+                if _keep_heading_as_content(raw):
+                    blocks.append(
+                        Block(
+                            text=raw,
+                            source_path=source_path,
+                            source_file=source_file,
+                            section_path=" > ".join(section_stack),
+                            block_type="paragraph",
+                        )
                     )
+                continue
+
+            blocks.append(
+                Block(
+                    text=raw,
+                    source_path=source_path,
+                    source_file=source_file,
+                    section_path=" > ".join(section_stack),
+                    block_type="paragraph",
                 )
+            )
             continue
 
-        blocks.append(
-            Block(
-                text=raw,
-                source_path=source_path,
-                source_file=source_file,
-                section_path=" > ".join(section_stack),
-                block_type="paragraph",
-            )
-        )
-
-    for t_idx, table in enumerate(doc.tables, start=1):
+        table_id += 1
         rows: List[List[str]] = []
-        for row in table.rows:
+        for row in item.rows:
             cells = [normalize_text(cell.text) for cell in row.cells]
             rows.append(cells)
 
@@ -162,10 +210,10 @@ def parse_docx(docx_path: Path) -> List[Block]:
             continue
 
         headers = rows[0] if _has_table_header(rows[0]) else [f"col_{i+1}" for i in range(len(rows[0]))]
-        for r_idx, cells in enumerate(rows, start=1):
+        for row_id, cells in enumerate(rows, start=1):
             if not any(cells):
                 continue
-            row_text = _table_row_text(table_id=t_idx, row_id=r_idx, headers=headers, cells=cells)
+            row_text = _table_row_text(table_id=table_id, row_id=row_id, headers=headers, cells=cells)
             blocks.append(
                 Block(
                     text=row_text,

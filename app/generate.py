@@ -6,7 +6,7 @@ from typing import Dict, List
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import SETTINGS
 from .schemas import AnswerResult, Citation, Chunk
@@ -104,10 +104,14 @@ class AnswerGenerator:
                 ),
             ]
             raw = self.llm.invoke(messages, format=GenerationOutput.model_json_schema()).content
-            parsed = GenerationOutput.model_validate_json(raw)
+            parsed = self._parse_generation_output(raw)
             logger.debug("LLM raw output: %s", raw)
         else:
             logger.info("Generation mode: extractive fallback")
+            parsed = self._extractive_generate(question, chunks)
+
+        if parsed is None:
+            logger.warning("LLM JSON parse failed, switching to extractive fallback")
             parsed = self._extractive_generate(question, chunks)
 
         parsed = self._normalize_output(question, chunks, parsed)
@@ -134,6 +138,38 @@ class AnswerGenerator:
             citations=citations,
             retrieved_chunk_ids=[c.chunk_id for c in chunks],
         )
+
+    def _parse_generation_output(self, raw: str) -> GenerationOutput | None:
+        if not raw:
+            return None
+        try:
+            return GenerationOutput.model_validate_json(raw)
+        except ValidationError:
+            pass
+
+        # Try to recover if model returned additional text or truncated tail.
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = raw[start : end + 1]
+            try:
+                return GenerationOutput.model_validate_json(candidate)
+            except ValidationError:
+                pass
+
+        # Last resort: salvage fields via regex from partially valid JSON.
+        ans_match = re.search(r'"answer_short"\s*:\s*"((?:\\.|[^"\\])*)"', raw, flags=re.DOTALL)
+        ids_match = re.search(r'"citation_chunk_ids"\s*:\s*\[([^\]]*)', raw, flags=re.DOTALL)
+        if ans_match:
+            answer_short = ans_match.group(1).encode("utf-8", "ignore").decode("unicode_escape")
+            citation_ids: List[int] = []
+            if ids_match:
+                citation_ids = [int(x) for x in re.findall(r"\d+", ids_match.group(1))]
+            return GenerationOutput(
+                answer_short=answer_short.strip() or "Недостаточно информации.",
+                citation_chunk_ids=citation_ids,
+            )
+        return None
 
     def _extractive_generate(self, question: str, chunks: List[Chunk]) -> GenerationOutput:
         logger.debug("Extractive generation started")
