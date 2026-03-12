@@ -1,0 +1,30 @@
+# Основные зависимости
+ollama>=0.1.0
+python-docx>=0.8.11
+tqdm>=4.64.0
+numpy>=1.21.0
+torch>=2.0.0
+
+# LangChain компоненты
+langchain>=0.1.0
+langchain-community>=0.0.10
+langchain-core>=0.1.0
+
+# Эмбеддинги и векторные БД
+faiss-cpu>=1.8.0
+
+# Реранкер
+transformers>=4.30.0
+torch>=2.0.0
+
+# Pydantic для валидации
+pydantic>=2.0.0
+
+# Для работы с текстом
+langchain-text-splitters>=0.0.1
+
+# Для работы с изображениями
+Pillow>=10.0.0
+
+# BM25
+rank-bm25>=0.2.2
